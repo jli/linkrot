@@ -17,7 +17,7 @@
 
 ;;; arch
 
-(def get-page client/get)
+(defn get-page [url] (client/get url {:throw-exceptions false}))
 
 (defn absolute? [url] (re-matches #"^https?://.*" url))
 (defn rooted? [url] (re-matches #"^/.*" url))
@@ -59,6 +59,12 @@
 (defn same-domain? [u1 u2]
   (.startsWith u1 (base u2)))
 
+(defn pair-with
+  ([f xs] (pair-with f xs false))
+  ([f xs parallel]
+     (let [map (if parallel pmap map)]
+       (map (fn [x] [x (f x)]) xs))))
+
 ;; statii are url->status code maps
 (defn crawl [url statii]
   (log "crawling page" url)
@@ -66,20 +72,19 @@
         links (parse-links url page)
         [seen unseen] (separate-with #(contains? statii %) links)
         [int ext] (separate-with #(same-domain? % url) unseen)
-        statii (reduce (fn [statii url]
-                         (assoc statii url (status url)))
-                       statii unseen)]
-    (log "links:" links)
-    (log "already seen:" seen)
-    (log "new:" unseen)
-    (log "new internal:" int)
-    (log "external:" ext)
+        _ (do (log "links:" links)
+              (log "already seen:" seen ", new:" unseen)
+              (log "new internal:" int ", external:" ext))
+        unseen-status (pair-with #(do (log "getting status of" %)
+                                      (status %))
+                                 unseen true)
+        statii (merge statii (into {} unseen-status))]
     (reduce (fn [acc next-url] (crawl next-url acc))
             statii
             int)))
 
 (defn thundercats-are-go [page ttl archive?]
-  (client/with-connection-pool {:timeout 5 :threads 2 :insecure? false}
+  (client/with-connection-pool {:timeout 5 :threads 4 :insecure? false}
     (log "on page" page "with crawl limit" ttl "(archiving:" archive? ")")
     (log "IGNORING TTL AND ARCHIVING")
     (let [res (crawl page {page (status page)})]
