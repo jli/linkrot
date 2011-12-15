@@ -54,14 +54,17 @@
    (rooted? url) (str (base full-url) url)
    :else (str (trim-last full-url) url)))
 
+(defn drop-id [url]
+  (second (re-matches #"^([^#]*).*" url)))
+
 (defn parse-links [url page]
   (let [nodes (-> page :body java.io.StringReader. html/html-resource)
-        links (set (map #(-> % :attrs :href)
-                        (html/select nodes [:a])))
+        links (map #(-> % :attrs :href)
+                   (html/select nodes [:a]))
         ;; nil when no href, like anchors with just names
         links (filter #(not (or (nil? %)
                                 (re-matches #"^$|^(?:mailto|ftp|gopher):.+" %))) links)]
-    (map #(rebase % url) links)))
+    (set (map #(rebase (drop-id %) url) links))))
 
 ;; correct?
 (defn same-domain? [u1 u2]
@@ -95,6 +98,8 @@
           statii
           seens))
 
+;; hmm. when url is http://blah.com/dir, there's a 301 redirecting to
+;; /dir/. Need trailing slash, or else rebasing gets messed up!
 (defn crawl [url statii]
   (log "crawling page" url)
   (let [page (get-page url)
