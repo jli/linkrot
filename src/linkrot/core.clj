@@ -1,9 +1,16 @@
-
 (ns linkrot.core
   (:use [clojure.tools.cli :only [cli]])
   (:require [clj-http.client :as client]
             [net.cgrand.enlive-html :as html])
   (:gen-class))
+
+;;; page info type:
+;;; * status code, :status
+;;; * what links here, :from
+
+;;; crawl site, building map from url to page info type.
+
+
 
 ;;; util
 
@@ -13,11 +20,23 @@
   (let [timestamp (-> (java.util.Date.) .getTime java.sql.Timestamp. .toString)]
     (apply println timestamp "|" args)))
 
+(defn separate-with [f coll]
+  (reduce (fn [[pass fail] x]
+            (if (f x)
+              [(conj pass x) fail]
+              [pass (conj fail x)]))
+          [[] []]
+          coll))
+
+(defn pair-with
+  ([f xs] (pair-with f xs true))
+  ([f xs parallel?]
+     (let [map (if parallel? pmap map)]
+       (map (fn [x] [x (f x)]) xs))))
+
 
 
 ;;; arch
-
-(defn get-page [url] (client/get url {:throw-exceptions false}))
 
 (defn absolute? [url] (re-matches #"^https?://.*" url))
 (defn rooted? [url] (re-matches #"^/.*" url))
@@ -37,35 +56,45 @@
 
 (defn parse-links [url page]
   (let [nodes (-> page :body java.io.StringReader. html/html-resource)
-        links (map #(-> % :attrs :href)
-                   (html/select nodes [:a]))]
+        links (set (map #(-> % :attrs :href)
+                        (html/select nodes [:a])))
+        ;; nil when no href, like anchors with just names
+        links (filter #(not (or (nil? %)
+                                (re-matches #"^$|^(?:mailto|ftp|gopher):.+" %))) links)]
     (map #(rebase % url) links)))
-
-
-
-;;; go
-
-(defn separate-with [f coll]
-  (reduce (fn [[pass fail] x]
-            (if (f x)
-              [(conj pass x) fail]
-              [pass (conj fail x)]))
-          [[] []]
-          coll))
-
-(defn status [url] (:status (client/head url {:throw-exceptions false})))
 
 ;; correct?
 (defn same-domain? [u1 u2]
   (.startsWith u1 (base u2)))
 
-(defn pair-with
-  ([f xs] (pair-with f xs false))
-  ([f xs parallel]
-     (let [map (if parallel pmap map)]
-       (map (fn [x] [x (f x)]) xs))))
+(defn get-page-prim [url]
+  (client/get url {:throw-exceptions false}))
 
-;; statii are url->status code maps
+(def get-page (memoize get-page-prim))
+
+(defn head-page [url]
+  (client/head url {:throw-exceptions false}))
+
+(defn status [url internal?]
+  ;; internal pages are GETed, so use get-page (which caches). use
+  ;; less expensive HEAD for external pages.
+  (:status ((if internal? get-page head-page) url)))
+
+
+
+;;; go
+
+(defn page-info [url from-url internal?]
+  {:status (status url internal?)
+   :from [from-url]})
+
+;; update :from field in page-infos with new url
+(defn update-seen [statii seens from-url]
+  (reduce (fn [statii seen]
+            (update-in statii [seen :from] conj from-url))
+          statii
+          seens))
+
 (defn crawl [url statii]
   (log "crawling page" url)
   (let [page (get-page url)
@@ -75,10 +104,11 @@
         _ (do (log "links:" links)
               (log "already seen:" seen ", new:" unseen)
               (log "new internal:" int ", external:" ext))
-        unseen-status (pair-with #(do (log "getting status of" %)
-                                      (status %))
-                                 unseen true)
-        statii (merge statii (into {} unseen-status))]
+        [istatii estatii] [(pair-with #(page-info % url true) int)
+                           (pair-with #(page-info % url false) ext)]
+        statii (merge (update-seen statii seen url)
+                      (into {} istatii)
+                      (into {} estatii))]
     (reduce (fn [acc next-url] (crawl next-url acc))
             statii
             int)))
@@ -86,10 +116,12 @@
 (defn thundercats-are-go [page ttl archive?]
   (client/with-connection-pool {:timeout 5 :threads 4 :insecure? false}
     (log "on page" page "with crawl limit" ttl "(archiving:" archive? ")")
-    (log "IGNORING TTL AND ARCHIVING")
-    (let [res (crawl page {page (status page)})]
+    (let [res (crawl page {page (page-info page nil true)})
+          broken (filter (fn [[_ info]] (not= (:status info) 200)) res)]
       (log "done:" res)
-      (log "non-200s:" (filter (fn [[_ status]] (not= status 200)) res))
+      (log "brokens:")
+      (doseq [[url {:keys [status from]}] broken]
+        (println url status from))
       res)))
 
 
